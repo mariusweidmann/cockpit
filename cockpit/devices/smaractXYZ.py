@@ -264,7 +264,7 @@ class SmaractXYZ(Device):
     def sendXYZPositionUpdates(self):
         print("foo")
         while True:
-            for ch in range(2):
+            for ch in range(3):
                 if self.xyzMotionTargets[ch] is not None:
                     if (ctl.GetProperty_i32(d_handle, ch, ctl.Property.CHANNEL_STATE) & ctl.ChannelState.ACTIVELY_MOVING == 0):
                         self.xyzMotionTargets[ch] = None
