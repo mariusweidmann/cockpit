@@ -64,9 +64,11 @@ from cockpit.experiment import zStack
 from cockpit.experiment import si2d
 from cockpit.experiment import rotatorSweep
 from cockpit.experiment import SIMFlux
+from cockpit.experiment import test
 
 ## List of registered modules.
 registeredModules = [
+    test,
     zStack,
     sweptShutter,
     offsetGainCorrection,
