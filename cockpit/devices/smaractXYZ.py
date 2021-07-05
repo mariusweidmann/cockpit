@@ -271,7 +271,7 @@ class SmaractXYZ(Device):
             time.sleep(0.001)
             x, y, z = self.getXYZPosition()
             delta = abs(x - prevX) + abs(y - prevY) + abs(z-prevZ) + abs(z - prevZ)
-            if delta < 1.:
+            if delta < 0.5:
                 print(time.time_ns(), "no movement")
                 # No movement since last time; done moving.
                 for axis in [0, 1, 2]:
