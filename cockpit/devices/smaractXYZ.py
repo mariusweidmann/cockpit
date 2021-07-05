@@ -153,9 +153,10 @@ class SmaractXYZ(Device):
             self.getXYZPosition()
             for ch in range(2):
                 move_mode = ctl.MoveMode.CL_ABSOLUTE
-            self.findReference()
+            if (self.findReference() != True):
+                sys.exit(1)
 
-            
+
         except ctl.Error as e:
         # Passing an error code to "GetResultInfo" returns a human readable string
         # specifying the error.
@@ -164,13 +165,15 @@ class SmaractXYZ(Device):
         except Exception as ex:
             print("Unexpected error: {}, {} in line: {}".format(ex, type(ex), (sys.exc_info()[-1].tb_lineno)))
             raise
-            
-            
-        
-        
+
+
+
+
     ## Home the motors.
     def findReference(self):
-        for ch in range(2,-1,-1):
+        msg_OK = "Successfully referenced ch "
+        msg_FAIL = "There was a problem homing ch "
+        for ch in reversed(range(3)):
             r_id = ctl.RequestReadProperty(d_handle, ch, ctl.Property.CHANNEL_STATE, 0)
             state = ctl.ReadProperty_i32(d_handle, r_id)
             if (state & ctl.ChannelState.IS_CALIBRATED) == 0: #not calibrated (please do this by manually)
@@ -184,19 +187,19 @@ class SmaractXYZ(Device):
                     time.sleep(0.1)
                 busy_box.Hide()
                 busy_box.Destroy()
-
                 # Was homing successful?
-                msg = ''
                 r_id = ctl.RequestReadProperty(d_handle, ch, ctl.Property.CHANNEL_STATE, 0)
                 state = ctl.ReadProperty_i32(d_handle, r_id)
-                if (state & ctl.ChannelState.IS_REFERENCED) == 0:
-                    msg += 'There was a problem homing ch '+str(ch)+'.\n'
-                    cockpit.gui.guiUtils.showHelpDialog(None, msg)
-                    return(1)
-                else:
+                if (state & ctl.ChannelState.IS_REFERENCED) != 0:
+                    msg_OK += str(ch) + ' '
                     self.sendXYZPositionUpdates()
-                    cockpit.gui.guiUtils.showHelpDialog(None, 'Homing successful.')
-        return(0)
+                else:
+                    msg_FAIL += str(ch)
+                    cockpit.gui.guiUtils.showHelpDialog(None, msg_FAIL)
+                    return(False)
+
+        cockpit.gui.guiUtils.showHelpDialog(None, msg_OK)
+        return(True)
 
 
     ## When the user logs out, switch to open-loop mode.
@@ -233,7 +236,7 @@ class SmaractXYZ(Device):
 
 
     def moveXYZAbsolute(self, ch, pos):
-        print("moveXYZAbsolute " + str(ch) + " " + str(pos))
+        #print("moveXYZAbsolute " + str(ch) + " " + str(pos))
         with self.xyzLock:
             if self.xyzMotionTargets[ch] is not None:
                 # Don't stack motion commands for the same ch
@@ -244,7 +247,7 @@ class SmaractXYZ(Device):
         ctl.SetProperty_i64(d_handle, ch, ctl.Property.MOVE_VELOCITY, VELOCITY)
         ctl.SetProperty_i64(d_handle, ch, ctl.Property.MOVE_ACCELERATION, ACCELERATION)
         # The factor of 10000000 converts from µm to pm.
-        print('MOVING ' + str(ch) + ' ' + str(self.xyzMotionTargets[ch]))
+        #print('MOVING ' + str(ch) + ' ' + str(self.xyzMotionTargets[ch]))
         ctl.Move(d_handle, ch, int(pos * scale))
         self.sendXYZPositionUpdates()
 
@@ -253,7 +256,7 @@ class SmaractXYZ(Device):
         if not delta:
             # Received a bogus motion request.
             return
-        print("moveXYZRelative " + str(ch) + " " + str(delta))
+        #print("moveXYZRelative " + str(ch) + " " + str(delta))
         curPos = self.xyzPositionCache[ch]
         self.moveXYZAbsolute(ch, curPos + delta)
 
@@ -262,24 +265,20 @@ class SmaractXYZ(Device):
     ## TODO: Query stage to see if it still actively moving, don't rely on a change in the positions!
     @cockpit.util.threads.callInNewThread
     def sendXYZPositionUpdates(self):
-        print("foo")
         while True:
+            if self.xyzMotionTargets is [None, None, None]:
+                time.sleep(0.05)
+                return
             for ch in range(3):
                 if self.xyzMotionTargets[ch] is not None:
                     if (ctl.GetProperty_i32(d_handle, ch, ctl.Property.CHANNEL_STATE) & ctl.ChannelState.ACTIVELY_MOVING == 0):
                         self.xyzMotionTargets[ch] = None
                         events.publish(events.STAGE_STOPPED, '%d SmaractMover' % ch)
-                        print('stopped %d\n' % ch)
                     else:
-                        #print('xyzMT '+str(ch)+' '+str(self.xyzMotionTargets))
                         events.publish(events.STAGE_MOVER, ch)
-                        time.sleep(0.1)
-            if self.xyzMotionTargets[0] is None:
-                if self.xyzMotionTargets[1] is None:
-                    if self.xyzMotionTargets[2] is None:
-                        print("bar")
-                        return
-                    
+                        time.sleep(0.05)
+            
+
 
     ## Get the position of the specified ch, or both axes by default.
     def getXYZPosition(self, ch = None):
