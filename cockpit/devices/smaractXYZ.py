@@ -51,6 +51,7 @@
 ## POSSIBILITY OF SUCH DAMAGE.
 
 
+from wx.core import Position
 from cockpit import events
 import cockpit.gui.guiUtils
 import cockpit.handlers.stagePositioner
@@ -266,18 +267,23 @@ class SmaractXYZ(Device):
     @cockpit.util.threads.callInNewThread
     def sendXYZPositionUpdates(self):
         while True:
-            if self.xyzMotionTargets is [None, None, None]:
-                time.sleep(0.05)
+            prevX, prevY, prevZ = self.getXYZPosition()
+            time.sleep(0.001)
+            x, y, z = self.getXYZPosition()
+            delta = abs(x - prevX) + abs(y - prevY) + abs(z-prevZ) + abs(z - prevZ)
+            if delta < 1.:
+                print(time.time_ns(), "no movement")
+                # No movement since last time; done moving.
+                for axis in [0, 1, 2]:
+                    events.publish(events.STAGE_STOPPED, '%d Smaract mover' % axis)
+                with self.xyzLock:
+                    self.xyzMotionTargets = [None, None, None]
                 return
-            for ch in range(3):
-                if self.xyzMotionTargets[ch] is not None:
-                    if (ctl.GetProperty_i32(d_handle, ch, ctl.Property.CHANNEL_STATE) & ctl.ChannelState.ACTIVELY_MOVING == 0):
-                        self.xyzMotionTargets[ch] = None
-                        events.publish(events.STAGE_STOPPED, '%d SmaractMover' % ch)
-                    else:
-                        events.publish(events.STAGE_MOVER, ch)
-                        time.sleep(0.05)
-            
+
+            for axis in [0, 1, 2]:
+                events.publish(events.STAGE_MOVER, axis)
+            time.sleep(.01)
+
 
 
     ## Get the position of the specified ch, or both axes by default.
