@@ -51,7 +51,6 @@
 ## POSSIBILITY OF SUCH DAMAGE.
 
 
-from wx.core import Position
 from cockpit import events
 import cockpit.gui.guiUtils
 import cockpit.handlers.stagePositioner
@@ -59,6 +58,8 @@ from cockpit import interfaces
 import cockpit.util.logger
 import cockpit.util.threads
 import cockpit.util.userConfig
+
+from threading import Lock
 
 from cockpit.devices.device import Device
 from OpenGL.GL import *
@@ -72,8 +73,8 @@ import sys
 import os
 #import cockpit.drivers.smaractctl.smaract.ctl.bindings
 import smaract.ctl as ctl
-VELOCITY = 5000000000
-ACCELERATION = 100000000000
+VELOCITY = 25000000000
+ACCELERATION = 250000000000
 scale = 1000000
 
 
@@ -94,6 +95,8 @@ d_handle = int
 d_handle = 0
 d_handle = int(d_handle)
 
+positionUpdateThreadExistsLock = Lock()
+xyzMotionTargetsLock = Lock()
 
 class SmaractXYZ(Device):
     def __init__(self, name, config):
@@ -123,7 +126,7 @@ class SmaractXYZ(Device):
                 self.softlimits=eval(lstr)
         except:
             print ("No softlimits section setting default limits")
-            self.softlimits = ((-15000, -15000, -15000), (15000, 15000, 15000))
+            self.softlimits = ((-5000, -5000, -3000), (5000, 5000, 15000))
 
         events.subscribe(events.USER_ABORT, self.onAbort)
         #events.subscribe('macro stage xyz draw', self.onMacroStagePaint)
@@ -154,10 +157,9 @@ class SmaractXYZ(Device):
             self.getXYZPosition()
             for ch in range(2):
                 move_mode = ctl.MoveMode.CL_ABSOLUTE
-            if (self.findReference() != True):
-                sys.exit(1)
+            self.findReference()
 
-
+            
         except ctl.Error as e:
         # Passing an error code to "GetResultInfo" returns a human readable string
         # specifying the error.
@@ -166,14 +168,13 @@ class SmaractXYZ(Device):
         except Exception as ex:
             print("Unexpected error: {}, {} in line: {}".format(ex, type(ex), (sys.exc_info()[-1].tb_lineno)))
             raise
-
-
-
-
+        
+        # start stage movement event loop
+        
+        
+        
     ## Home the motors.
     def findReference(self):
-        msg_OK = "Successfully referenced ch "
-        msg_FAIL = "There was a problem homing ch "
         for ch in reversed(range(3)):
             r_id = ctl.RequestReadProperty(d_handle, ch, ctl.Property.CHANNEL_STATE, 0)
             state = ctl.ReadProperty_i32(d_handle, r_id)
@@ -188,19 +189,19 @@ class SmaractXYZ(Device):
                     time.sleep(0.1)
                 busy_box.Hide()
                 busy_box.Destroy()
+
                 # Was homing successful?
+                msg = ''
                 r_id = ctl.RequestReadProperty(d_handle, ch, ctl.Property.CHANNEL_STATE, 0)
                 state = ctl.ReadProperty_i32(d_handle, r_id)
-                if (state & ctl.ChannelState.IS_REFERENCED) != 0:
-                    msg_OK += str(ch) + ' '
-                    self.sendXYZPositionUpdates()
+                if (state & ctl.ChannelState.IS_REFERENCED) == 0:
+                    msg += 'There was a problem homing ch '+str(ch)+'.\n'
+                    cockpit.gui.guiUtils.showHelpDialog(None, msg)
+                    return(1)
                 else:
-                    msg_FAIL += str(ch)
-                    cockpit.gui.guiUtils.showHelpDialog(None, msg_FAIL)
-                    return(False)
-
-        cockpit.gui.guiUtils.showHelpDialog(None, msg_OK)
-        return(True)
+                    self.sendXYZPositionUpdates()
+                    cockpit.gui.guiUtils.showHelpDialog(None, 'Homing successful.')
+        return(0)
 
 
     ## When the user logs out, switch to open-loop mode.
@@ -228,10 +229,10 @@ class SmaractXYZ(Device):
         for ch, minPos, maxPos in [(0, self.softlimits[0][0],self.softlimits[1][0]),
                     (1, self.softlimits[0][1],self.softlimits[1][1]), (2, self.softlimits[0][2],self.softlimits[1][2])]:
             result.append(cockpit.handlers.stagePositioner.PositionerHandler(
-                    "%d Smaract mover" % ch, "%d stage motion" % ch, False,
+                    "%d SmaractMover" % ch, "%d stage motion" % ch, False,
                     {'moveAbsolute': self.moveXYZAbsolute,
-                         'moveRelative': self.moveXYZRelative,
-                         'getPosition': self.getXYZPosition},
+                        'moveRelative': self.moveXYZRelative,
+                        'getPosition': self.getXYZPosition},
                     ch, (minPos, maxPos), (minPos, maxPos)))
         return result
 
@@ -239,19 +240,25 @@ class SmaractXYZ(Device):
     def moveXYZAbsolute(self, ch, pos):
         #print("moveXYZAbsolute " + str(ch) + " " + str(pos))
         with self.xyzLock:
-            if self.xyzMotionTargets[ch] is not None:
+            if self.xyzMotionTargets[ch] != None:
                 # Don't stack motion commands for the same ch
                 return
-        self.xyzMotionTargets[ch] = pos
+        
         #this should be set every time, as it may help with controling the stage via the handheld module and cockpit at the same time (according to manufacturer)
         ctl.SetProperty_i32(d_handle, ch, ctl.Property.MOVE_MODE, ctl.MoveMode.CL_ABSOLUTE)
         ctl.SetProperty_i64(d_handle, ch, ctl.Property.MOVE_VELOCITY, VELOCITY)
         ctl.SetProperty_i64(d_handle, ch, ctl.Property.MOVE_ACCELERATION, ACCELERATION)
         # The factor of 10000000 converts from µm to pm.
         #print('MOVING ' + str(ch) + ' ' + str(self.xyzMotionTargets[ch]))
+        
+        xyzMotionTargetsLock.acquire()
+        if self.xyzMotionTargets == [None, None, None]:
+            self.sendXYZPositionUpdates()              
+        self.xyzMotionTargets[ch] = pos
         ctl.Move(d_handle, ch, int(pos * scale))
-        self.sendXYZPositionUpdates()
-
+        self.getXYZPosition(ch)
+        events.publish(events.STAGE_MOVER, ch) 
+        xyzMotionTargetsLock.release()
 
     def moveXYZRelative(self, ch, delta):
         if not delta:
@@ -263,28 +270,86 @@ class SmaractXYZ(Device):
 
 
     ## Send updates on the XYZ stage's position, until it stops moving.
-    ## TODO: Query stage to see if it still actively moving, don't rely on a change in the positions!
-    @cockpit.util.threads.callInNewThread
+    #@cockpit.util.threads.callInNewThread
+    #def sendXYZPositionUpdates(self):
+    #   while True:
+            #time.sleep(0.1)
+            
+            #xyzMotionTargetsLock.acquire()
+            #for ch in range(3):
+                #if self.xyzMotionTargets[ch] is not None:
+                    ##if (ctl.GetProperty_i32(d_handle, ch, ctl.Property.CHANNEL_STATE) & ctl.ChannelState.ACTIVELY_MOVING == 0):
+                        ##self.xyzMotionTargets[ch] = None
+                        ##events.publish(events.STAGE_STOPPED, '%d SmaractMover' % ch)
+                        ###print('stopped %d\n' % ch)
+                    ##else:
+                        ##print('xyzMT '+str(ch)+' '+str(self.xyzMotionTargets))
+                        #self.getXYZPosition(ch)
+                        #events.publish(events.STAGE_MOVER, ch)
+            #xyzMotionTargetsLock.release();
+                       
+            #if self.xyzMotionTargets is [None, None, None]: #TODO: set these to None via waitForEvent(). I assume this has to be done in a separate thread.
+                #return
+            
+    @cockpit.util.threads.callInNewThread        
     def sendXYZPositionUpdates(self):
+        timeout = 100 # in ms
+        
+        print("Movement event waiter started");
+        
+        # loop as long as any channel still has a target
         while True:
-            prevX, prevY, prevZ = self.getXYZPosition()
-            time.sleep(0.001)
-            x, y, z = self.getXYZPosition()
-            delta = abs(x - prevX) + abs(y - prevY) + abs(z-prevZ) + abs(z - prevZ)
-            if delta < 0.5:
-                print(time.time_ns(), "no movement")
-                # No movement since last time; done moving.
-                for axis in [0, 1, 2]:
-                    events.publish(events.STAGE_STOPPED, '%d Smaract mover' % axis)
-                with self.xyzLock:
-                    self.xyzMotionTargets = [None, None, None]
+                                   
+            try:
+                event = ctl.WaitForEvent(d_handle, timeout)
+                # The "type" field specifies the event.
+                # The "idx" field holds the device index for this event, it will always be "0", thus might be ignored here.
+                # The "i32" data field gives additional information about the event.
+                if event.type == ctl.EventType.MOVEMENT_FINISHED:
+                    if (event.i32 == ctl.ErrorCode.NONE):
+                        # Movement finished.
+                        xyzMotionTargetsLock.acquire()
+                        self.xyzMotionTargets[event.idx] = None
+                        self.getXYZPosition()
+                        events.publish(events.STAGE_MOVER, event.idx) 
+                        events.publish(events.STAGE_STOPPED, '%d SmaractMover' % event.idx) 
+                        print("MCS2 movement finished, channel: ", event.idx)                   
+                        xyzMotionTargetsLock.release()
+                    else:
+                        # The movement failed for some reason. E.g. an endstop was detected.
+                        # TODO: this should raise an error conditions
+                        print("MCS2 movement finished, channel: {}, error: 0x{:04X} ({}) ".format(event.idx, event.i32, ctl.GetResultInfo(event.i32)))
+                else:
+                    # The code should be prepared to handle unexpected events beside the expected ones.
+                    # TODO: this should raise an error conditions
+                    print("MCS2 received event: {}".format(ctl.GetEventInfo(event)))
+
+            except ctl.Error as e:
+                if e.code == ctl.ErrorCode.TIMEOUT:
+                    print("Info: MCS2 wait for event timed out after {} ms".format(timeout))
+                    for ch in range(3):
+                        xyzMotionTargetsLock.acquire()
+                        if ((self.xyzMotionTargets[ch] != None) and (ctl.GetProperty_i32(d_handle, ch, ctl.Property.CHANNEL_STATE) & ctl.ChannelState.ACTIVELY_MOVING == 0)):
+                            self.xyzMotionTargets[ch] = None
+                            self.getXYZPosition()
+                            events.publish(events.STAGE_MOVER, event.idx) 
+                            events.publish(events.STAGE_STOPPED, '%d SmaractMover' % ch) 
+                            print("INFO: MCS2 movement finished in timeout, channel: ", ch)                                               
+                        else:
+                            self.getXYZPosition()
+                            events.publish(events.STAGE_MOVER, ch) 
+                        xyzMotionTargetsLock.release()
+                else:
+                    print("MCS2 {}".format(ctl.GetResultInfo(e.code)))
+                    
+            xyzMotionTargetsLock.acquire()
+            print( self.xyzMotionTargets )
+            if self.xyzMotionTargets == [None, None, None]:
+                print("Movement event waiter finished")
+                xyzMotionTargetsLock.release()
                 return
-
-            for axis in [0, 1, 2]:
-                events.publish(events.STAGE_MOVER, axis)
-            time.sleep(.01)
-
-
+            xyzMotionTargetsLock.release()
+                    
 
     ## Get the position of the specified ch, or both axes by default.
     def getXYZPosition(self, ch = None):
@@ -294,10 +359,12 @@ class SmaractXYZ(Device):
         z = ctl.GetProperty_i64(d_handle, 2, ctl.Property.POSITION) /1000000
         self.xyzPositionCache = (x, y, z)
         #print(self.xyzPositionCache)
-        if ch is None:
+        if ch == None:
             return self.xyzPositionCache
         return self.xyzPositionCache[ch]
 
 
     def makeInitialPublications(self):
         self.sendXYZPositionUpdates()
+
+
