@@ -234,6 +234,8 @@ class SmaractXYZ(Device):
                         'moveRelative': self.moveXYZRelative,
                         'getPosition': self.getXYZPosition},
                     ch, (minPos, maxPos), (minPos, maxPos)))
+        for handler in result:
+            handler.isEligibleForExperiments = True
         return result
 
 
@@ -293,7 +295,7 @@ class SmaractXYZ(Device):
             
     @cockpit.util.threads.callInNewThread        
     def sendXYZPositionUpdates(self):
-        timeout = 100 # in ms
+        timeout = 150 # in ms
         
         print("Movement event waiter started");
         
